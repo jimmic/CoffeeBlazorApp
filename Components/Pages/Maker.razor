@@ -1,0 +1,164 @@
+@page "/maker"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using CoffeeBlazorApp.Data
+@using CoffeeBlazorApp.Services
+@using Microsoft.AspNetCore.SignalR.Client
+@inject CoffeeOrderService OrderService
+@inject NavigationManager Navigation
+@inject IConfiguration Configuration
+
+<PageTitle>Coffee Maker Queue</PageTitle>
+
+<div class="maker-shell">
+    <div class="maker-header">
+        <div>
+            <p class="eyebrow">Internal station</p>
+            <h1>Coffee maker queue</h1>
+        </div>
+        @if (isUnlocked)
+        {
+            <button class="btn btn-outline-secondary" @onclick="Lock">Lock screen</button>
+        }
+    </div>
+
+    @if (!isUnlocked)
+    {
+        <div class="order-card access-card">
+            <h2>Staff access</h2>
+            <p>Enter the station access key to view incoming orders.</p>
+            <input type="password" @bind="accessKey" class="form-control" placeholder="Access key" @onkeydown="HandleAccessKeyAsync" />
+            <button class="btn btn-primary mt-3" @onclick="UnlockAsync">Open queue</button>
+            @if (accessDenied)
+            {
+                <div class="alert alert-danger mt-3">That access key is not valid.</div>
+            }
+        </div>
+    }
+    else
+    {
+        @if (orders.Count == 0)
+        {
+            <div class="empty-state">No active orders. New orders will appear here automatically.</div>
+        }
+        else
+        {
+            <div class="maker-grid">
+                @foreach (var order in orders)
+                {
+                    <article class="maker-order">
+                        <div class="maker-order-topline">
+                            <strong>#@order.OrderNumber</strong>
+                            <span class="order-status status-@order.Status.ToString().ToLowerInvariant()">@GetStatusText(order.Status)</span>
+                        </div>
+                        <h2>@order.CoffeeType</h2>
+                        <p>@order.Size</p>
+                        <button class="btn btn-primary" @onclick="() => AdvanceOrderAsync(order)">
+                            @GetNextAction(order.Status)
+                        </button>
+                    </article>
+                }
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private readonly List<CoffeeOrder> orders = [];
+    private HubConnection? hubConnection;
+    private string accessKey = string.Empty;
+    private bool isUnlocked;
+    private bool accessDenied;
+
+    protected override async Task OnInitializedAsync()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl(Navigation.ToAbsoluteUri("/hubs/orders"))
+            .WithAutomaticReconnect()
+            .Build();
+        hubConnection.On<CoffeeOrderSummary>("OrderCreated", _ => RefreshOrdersAsync());
+        hubConnection.On<CoffeeOrderSummary>("OrderStatusChanged", _ => RefreshOrdersAsync());
+        await hubConnection.StartAsync();
+    }
+
+    private async Task UnlockAsync()
+    {
+        var configuredKey = Configuration["CoffeeMaker:AccessKey"];
+        isUnlocked = !string.IsNullOrWhiteSpace(configuredKey)
+            && string.Equals(accessKey, configuredKey, StringComparison.Ordinal);
+        accessDenied = !isUnlocked;
+        if (isUnlocked)
+        {
+            await RefreshOrdersAsync();
+        }
+    }
+
+    private async Task HandleAccessKeyAsync(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+        {
+            await UnlockAsync();
+        }
+    }
+
+    private async Task RefreshOrdersAsync()
+    {
+        if (!isUnlocked)
+        {
+            return;
+        }
+
+        var activeOrders = await OrderService.GetActiveOrdersAsync();
+        orders.Clear();
+        orders.AddRange(activeOrders);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task AdvanceOrderAsync(CoffeeOrder order)
+    {
+        var nextStatus = order.Status switch
+        {
+            OrderStatus.Queued => OrderStatus.Preparing,
+            OrderStatus.Preparing => OrderStatus.Ready,
+            OrderStatus.Ready => OrderStatus.Completed,
+            _ => order.Status
+        };
+
+        if (nextStatus != order.Status)
+        {
+            await OrderService.AdvanceStatusAsync(order.Id, nextStatus);
+        }
+    }
+
+    private void Lock()
+    {
+        isUnlocked = false;
+        accessKey = string.Empty;
+        orders.Clear();
+    }
+
+    private static string GetNextAction(OrderStatus status) => status switch
+    {
+        OrderStatus.Queued => "Start preparing",
+        OrderStatus.Preparing => "Mark ready",
+        OrderStatus.Ready => "Complete order",
+        _ => "Completed"
+    };
+
+    private static string GetStatusText(OrderStatus status) => status switch
+    {
+        OrderStatus.Queued => "Queued",
+        OrderStatus.Preparing => "Preparing",
+        OrderStatus.Ready => "Ready",
+        OrderStatus.Completed => "Completed",
+        _ => status.ToString()
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+}

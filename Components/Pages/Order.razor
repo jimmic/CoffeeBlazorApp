@@ -1,0 +1,154 @@
+@page "/order"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using CoffeeBlazorApp.Data
+@using CoffeeBlazorApp.Services
+@using Microsoft.AspNetCore.SignalR.Client
+@inject CoffeeOrderService OrderService
+@inject NavigationManager Navigation
+
+<PageTitle>Order Coffee</PageTitle>
+
+<div class="order-shell">
+    <div class="order-hero">
+        <p class="eyebrow">Freshly made for you</p>
+        <h1>Order your coffee</h1>
+        <p>Choose your drink and size. We’ll let you know when it’s ready for pickup.</p>
+    </div>
+
+    <EditForm Model="orderForm" OnValidSubmit="PlaceOrderAsync" class="order-card">
+        <DataAnnotationsValidator />
+        <ValidationSummary />
+
+        <label for="coffeeType">Coffee</label>
+        <InputSelect id="coffeeType" @bind-Value="orderForm.CoffeeType" class="form-select">
+            <option value="">Choose a coffee</option>
+            @foreach (var coffeeType in OrderService.AvailableCoffeeTypes)
+            {
+                <option value="@coffeeType">@coffeeType</option>
+            }
+        </InputSelect>
+
+        <label for="size">Size</label>
+        <InputSelect id="size" @bind-Value="orderForm.Size" class="form-select">
+            <option value="">Choose a size</option>
+            @foreach (var size in OrderService.AvailableSizes)
+            {
+                <option value="@size">@size</option>
+            }
+        </InputSelect>
+
+        <button type="submit" class="btn btn-primary" disabled="@isSubmitting">
+            @(isSubmitting ? "Placing order..." : "Place order")
+        </button>
+
+        @if (!string.IsNullOrWhiteSpace(errorMessage))
+        {
+            <div class="alert alert-danger mt-3">@errorMessage</div>
+        }
+    </EditForm>
+
+    <div class="tracking-card">
+        <h2>Track an order</h2>
+        <p>Enter the tracking token from your confirmation.</p>
+        <div class="tracking-row">
+            <input @bind="trackingToken" class="form-control" placeholder="Tracking token" />
+            <button type="button" class="btn btn-outline-primary" @onclick="FindOrderAsync">Find order</button>
+        </div>
+        @if (trackedOrder is not null)
+        {
+            <div class="order-status status-@trackedOrder.Status.ToString().ToLowerInvariant()">
+                <strong>Order #@trackedOrder.OrderNumber</strong>
+                <span>@trackedOrder.CoffeeType · @trackedOrder.Size</span>
+                <span>@GetStatusText(trackedOrder.Status)</span>
+            </div>
+        }
+        @if (!string.IsNullOrWhiteSpace(trackingMessage))
+        {
+            <p class="text-muted mt-3">@trackingMessage</p>
+        }
+    </div>
+</div>
+
+@code {
+    private readonly OrderForm orderForm = new();
+    private HubConnection? hubConnection;
+    private CoffeeOrder? trackedOrder;
+    private string trackingToken = string.Empty;
+    private string? errorMessage;
+    private string? trackingMessage;
+    private bool isSubmitting;
+
+    protected override async Task OnInitializedAsync()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl(Navigation.ToAbsoluteUri("/hubs/orders"))
+            .WithAutomaticReconnect()
+            .Build();
+        hubConnection.On<CoffeeOrderSummary>("OrderStatusChanged", summary =>
+        {
+            if (trackedOrder?.TrackingToken == summary.TrackingToken)
+            {
+                trackedOrder.Status = summary.Status;
+                _ = InvokeAsync(StateHasChanged);
+            }
+        });
+        await hubConnection.StartAsync();
+    }
+
+    private async Task PlaceOrderAsync()
+    {
+        isSubmitting = true;
+        errorMessage = null;
+        try
+        {
+            trackedOrder = await OrderService.CreateOrderAsync(orderForm.CoffeeType, orderForm.Size);
+            trackingToken = trackedOrder.TrackingToken;
+            trackingMessage = "Save this tracking token to check your order later.";
+            orderForm.CoffeeType = string.Empty;
+            orderForm.Size = string.Empty;
+        }
+        catch (ArgumentException exception)
+        {
+            errorMessage = exception.Message;
+        }
+        finally
+        {
+            isSubmitting = false;
+        }
+    }
+
+    private async Task FindOrderAsync()
+    {
+        trackingMessage = null;
+        trackedOrder = await OrderService.GetOrderAsync(trackingToken.Trim());
+        if (trackedOrder is null)
+        {
+            trackingMessage = "We couldn’t find an order with that token.";
+        }
+    }
+
+    private static string GetStatusText(OrderStatus status) => status switch
+    {
+        OrderStatus.Queued => "Queued",
+        OrderStatus.Preparing => "Being prepared",
+        OrderStatus.Ready => "Ready for pickup",
+        OrderStatus.Completed => "Completed",
+        _ => status.ToString()
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+
+    private sealed class OrderForm
+    {
+        public string CoffeeType { get; set; } = string.Empty;
+
+        public string Size { get; set; } = string.Empty;
+    }
+}
